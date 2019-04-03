@@ -22,9 +22,8 @@ import (
 	"net"
 	"strings"
 
-	"github.com/golang/glog"
-
 	"github.com/aws/aws-sdk-go/service/elbv2"
+	"github.com/golang/glog"
 	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/aws"
 	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/ingress/annotations/parser"
 	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/ingress/errors"
@@ -41,11 +40,12 @@ type Config struct {
 	IPAddressType *string
 	WebACLId      *string
 
-	InboundCidrs   []string
-	Ports          []PortData
-	SecurityGroups []string
-	Subnets        []string
-	Attributes     []*elbv2.LoadBalancerAttribute
+	InboundCidrs     []string
+	Ports            []PortData
+	SecurityGroups   []string
+	Subnets          []string
+	Attributes       []*elbv2.LoadBalancerAttribute
+	GlobalInstanceLb bool
 }
 
 type loadBalancer struct {
@@ -107,6 +107,11 @@ func (lb loadBalancer) Parse(ing parser.AnnotationInterface) (interface{}, error
 		return nil, err
 	}
 
+	globalInstanceLb := true
+	if _, err := parser.GetBoolAnnotation("global-instance-sg", ing); err != nil {
+		globalInstanceLb = false
+	}
+
 	return &Config{
 		WebACLId:      webACLId,
 		Scheme:        scheme,
@@ -118,6 +123,8 @@ func (lb loadBalancer) Parse(ing parser.AnnotationInterface) (interface{}, error
 
 		Subnets:        subnets,
 		SecurityGroups: securityGroups,
+
+		GlobalInstanceLb: globalInstanceLb,
 	}, nil
 }
 

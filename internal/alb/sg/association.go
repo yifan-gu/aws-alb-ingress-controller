@@ -5,18 +5,17 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/elbv2"
 	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/alb/tags"
-	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/albctx"
-	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/k8s"
-	"k8s.io/apimachinery/pkg/types"
-
-	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/ingress/controller/store"
-
-	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/alb/tg"
+	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/albctx"
 	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/aws"
+	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/ingress/controller/store"
+	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/k8s"
+	"github.com/kubernetes-sigs/aws-alb-ingress-controller/pkg/util/log"
 	extensions "k8s.io/api/extensions/v1beta1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // AssociationController provides functionality to manage Association
@@ -62,10 +61,11 @@ type associationController struct {
 }
 
 type associationConfig struct {
-	LbPorts        []int64
-	LbInboundCIDRs []string
-	LbExternalSGs  []string
-	AdditionalTags map[string]string
+	LbPorts          []int64
+	LbInboundCIDRs   []string
+	LbExternalSGs    []string
+	AdditionalTags   map[string]string
+	GlobalInstanceLb bool
 }
 
 func (c *associationController) Reconcile(ctx context.Context, ingress *extensions.Ingress, lbInstance *elbv2.LoadBalancer, tgGroup tg.TargetGroupGroup) error {
@@ -81,6 +81,9 @@ func (c *associationController) Reconcile(ctx context.Context, ingress *extensio
 }
 
 func (c *associationController) Delete(ctx context.Context, ingressKey types.NamespacedName, lbInstance *elbv2.LoadBalancer) error {
+	if err := c.deleteLBSGRulesFromGlobalInstanceSG(ctx, ingressKey); err != nil {
+		return fmt.Errorf("failed to remove rules from managed instance securityGroups due to %v", err)
+	}
 	if err := c.deleteInstanceSGAndAttachment(ctx, ingressKey); err != nil {
 		return fmt.Errorf("failed to delete managed instance securityGroups due to %v", err)
 	}
@@ -102,7 +105,12 @@ func (c *associationController) reconcileWithManagedSGs(ctx context.Context, ing
 		return err
 	}
 
-	instanceSGID, err := c.reconcileInstanceSG(ctx, ingressKey, cfg, lbSGID)
+	var instanceSGID string
+	if cfg.GlobalInstanceLb {
+		instanceSGID, err = c.reconcileGlobalInstanceSG(ctx, ingressKey, cfg, lbSGID)
+	} else {
+		instanceSGID, err = c.reconcileInstanceSG(ctx, ingressKey, cfg, lbSGID)
+	}
 	if err != nil {
 		return err
 	}
@@ -174,26 +182,42 @@ func (c *associationController) reconcileInstanceSG(ctx context.Context, ingress
 	sgName := c.nameTagGen.NameInstanceSG(ingressKey.Namespace, ingressKey.Name)
 	sgInstance, err := c.ensureSGInstance(ctx, sgName, "managed instance securityGroup by ALB Ingress Controller")
 	if err != nil {
-		return "", fmt.Errorf("failed to reconcile managed instance securityGroup due to %v", err)
+		return "", fmt.Errorf("failed to ensure managed instance securityGroup due to %v", err)
 	}
 	sgTags := c.nameTagGen.TagInstanceSG(ingressKey.Namespace, ingressKey.Name)
 	for k, v := range cfg.AdditionalTags {
 		sgTags[k] = v
 	}
-	inboundPermissions := []*ec2.IpPermission{
-		{
-			IpProtocol: aws.String("tcp"),
-			FromPort:   aws.Int64(0),
-			ToPort:     aws.Int64(65535),
-			UserIdGroupPairs: []*ec2.UserIdGroupPair{
-				{
-					GroupId: aws.String(lbSGID),
-				},
-			},
-		},
-	}
+	inboundPermissions := []*ec2.IpPermission{allowLBSGIpPermission(lbSGID)}
+
 	if err := c.sgController.Reconcile(ctx, sgInstance, inboundPermissions, sgTags); err != nil {
 		return "", fmt.Errorf("failed to reconcile managed instance securityGroup due to %v", err)
+	}
+	return aws.StringValue(sgInstance.GroupId), nil
+}
+
+func (c *associationController) reconcileGlobalInstanceSG(ctx context.Context, ingressKey types.NamespacedName, cfg associationConfig, lbSGID string) (string, error) {
+	newPermission := allowLBSGIpPermission(lbSGID)
+	sgInstance, inboundPermissions, err := c.findGlobalInstanceSG(ctx, newPermission)
+	if err != nil {
+		return "", fmt.Errorf("failed to find managed global instance securityGroup due to %v", err)
+	}
+
+	if sgInstance == nil {
+		sgInstance, err = c.createGlobalInstanceSG(ctx, "managed global instance securityGroup by ALB Ingress Controller")
+		if err != nil {
+			return "", fmt.Errorf("failed to create global instance securityGroup due to %v", err)
+		}
+		inboundPermissions = []*ec2.IpPermission{newPermission}
+	}
+
+	sgTags := c.nameTagGen.TagGlobalInstanceSG()
+	for k, v := range cfg.AdditionalTags {
+		sgTags[k] = v
+	}
+
+	if err := c.sgController.Reconcile(ctx, sgInstance, inboundPermissions, sgTags); err != nil {
+		return "", fmt.Errorf("failed to reconcile managed global instance securityGroup due to %v", err)
 	}
 	return aws.StringValue(sgInstance.GroupId), nil
 }
@@ -211,6 +235,55 @@ func (c *associationController) deleteInstanceSGAndAttachment(ctx context.Contex
 		return err
 	}
 	return c.deleteSGInstance(ctx, sgInstance)
+}
+
+func (c *associationController) deleteLBSGRulesFromGlobalInstanceSG(ctx context.Context, ingressKey types.NamespacedName) error {
+	sgName := c.nameTagGen.NameLBSG(ingressKey.Namespace, ingressKey.Name)
+	sgInstance, err := c.cloud.GetSecurityGroupByName(sgName)
+	if err != nil {
+		return err
+	}
+	if sgInstance == nil {
+		return nil
+	}
+
+	tags := c.nameTagGen.TagGlobalInstanceSG()
+	sgInstances, err := c.cloud.GetSecurityGroupsByTags(tags)
+	if err != nil {
+		return err
+	}
+	for _, sg := range sgInstances {
+		totalRules := countTotalRules(sg)
+		var toRevoke []*ec2.IpPermission
+		for _, p := range sg.IpPermissions {
+			for _, pair := range p.UserIdGroupPairs {
+				if aws.StringValue(pair.GroupId) == aws.StringValue(sgInstance.GroupId) {
+					toRevoke = append(toRevoke, allowLBSGIpPermission(aws.StringValue(sgInstance.GroupId)))
+					totalRules--
+				}
+			}
+
+			if len(toRevoke) > 0 {
+				albctx.GetLogger(ctx).Infof("revoking inbound permissions from securityGroup %s: %v", aws.StringValue(sg.GroupId), log.Prettify(p))
+				if _, err := c.cloud.RevokeSecurityGroupIngressWithContext(ctx, &ec2.RevokeSecurityGroupIngressInput{
+					GroupId:       sg.GroupId,
+					IpPermissions: toRevoke,
+				}); err != nil {
+					return fmt.Errorf("failed to revoke inbound permissions due to %v", err)
+				}
+			}
+		}
+
+		if totalRules == 0 {
+			if err := c.instanceAttachmentController.Delete(ctx, aws.StringValue(sg.GroupId)); err != nil {
+				return err
+			}
+			if err := c.deleteSGInstance(ctx, sg); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (c *associationController) ensureSGInstance(ctx context.Context, groupName string, description string) (*ec2.SecurityGroup, error) {
@@ -255,10 +328,11 @@ func (c *associationController) buildAssociationConfig(ctx context.Context, ingr
 		return associationConfig{}, err
 	}
 	return associationConfig{
-		LbPorts:        lbPorts,
-		LbInboundCIDRs: ingressAnnos.LoadBalancer.InboundCidrs,
-		LbExternalSGs:  lbExternalSGs,
-		AdditionalTags: ingressAnnos.Tags.LoadBalancer,
+		LbPorts:          lbPorts,
+		LbInboundCIDRs:   ingressAnnos.LoadBalancer.InboundCidrs,
+		LbExternalSGs:    lbExternalSGs,
+		AdditionalTags:   ingressAnnos.Tags.LoadBalancer,
+		GlobalInstanceLb: ingressAnnos.LoadBalancer.GlobalInstanceLb,
 	}, nil
 }
 
@@ -291,4 +365,85 @@ func (c *associationController) resolveSecurityGroupIDs(ctx context.Context, sgI
 	}
 
 	return output, nil
+}
+
+func (c *associationController) findGlobalInstanceSG(ctx context.Context, new *ec2.IpPermission) (*ec2.SecurityGroup, []*ec2.IpPermission, error) {
+	// TODO(yifan): Figure out how to get the limit of rules per SG.
+	// For now, 60 rules per global instance SG is good enough.
+	defaultRulesLimit := 60
+
+	tags := c.nameTagGen.TagGlobalInstanceSG()
+	sgInstances, err := c.cloud.GetSecurityGroupsByTags(tags)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, sg := range sgInstances {
+		if containsInboundPermission(sg, new) {
+			return sg, sg.IpPermissions, nil // Don't create new SGs when reconciling for existing ingress.
+		}
+	}
+	for _, sg := range sgInstances {
+		if countTotalRules(sg) < defaultRulesLimit {
+			return sg, append(sg.IpPermissions, new), nil
+		}
+	}
+	return nil, nil, nil
+}
+
+func (c *associationController) createGlobalInstanceSG(ctx context.Context, description string) (*ec2.SecurityGroup, error) {
+	groupName := c.nameTagGen.NameGlobalInstanceSG()
+	albctx.GetLogger(ctx).Infof("creating global node securityGroup %v:%v", groupName, description)
+	resp, err := c.cloud.CreateSecurityGroupWithContext(ctx, &ec2.CreateSecurityGroupInput{
+		GroupName:   aws.String(groupName),
+		Description: aws.String(description),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &ec2.SecurityGroup{
+		GroupId:   resp.GroupId,
+		GroupName: aws.String(groupName),
+	}, nil
+}
+
+// This counts the total rules in a SG roughly.
+func countTotalRules(sg *ec2.SecurityGroup) int {
+	var totalRules int
+	for _, p := range sg.IpPermissions {
+		IpRangesCount := len(p.IpRanges)
+		if len(p.Ipv6Ranges) > IpRangesCount {
+			IpRangesCount = len(p.Ipv6Ranges)
+		}
+		totalRules += IpRangesCount + len(p.PrefixListIds) + len(p.UserIdGroupPairs)
+	}
+	return totalRules
+}
+
+func allowLBSGIpPermission(lbSGID string) *ec2.IpPermission {
+	return &ec2.IpPermission{
+		IpProtocol: aws.String("tcp"),
+		FromPort:   aws.Int64(0),
+		ToPort:     aws.Int64(65535),
+		UserIdGroupPairs: []*ec2.UserIdGroupPair{
+			{
+				GroupId: aws.String(lbSGID),
+			},
+		},
+	}
+}
+
+func containsInboundPermission(sg *ec2.SecurityGroup, new *ec2.IpPermission) bool {
+	for _, p := range sg.IpPermissions {
+		if aws.StringValue(p.IpProtocol) == aws.StringValue(new.IpProtocol) &&
+			aws.Int64Value(p.FromPort) == aws.Int64Value(new.FromPort) &&
+			aws.Int64Value(p.ToPort) == aws.Int64Value(new.ToPort) {
+
+			for _, pair := range p.UserIdGroupPairs {
+				if aws.StringValue(pair.GroupId) == aws.StringValue(new.UserIdGroupPairs[0].GroupId) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

@@ -13,6 +13,8 @@ const (
 	TagKeyIngressName = "kubernetes.io/ingress-name"
 	TagKeyServiceName = "kubernetes.io/service-name"
 	TagKeyServicePort = "kubernetes.io/service-port"
+
+	TagKeyGlobalInstanceSG = "alb.controller.abs.sh/node-global"
 )
 
 var _ tg.TagGenerator = (*TagGenerator)(nil)
@@ -45,6 +47,24 @@ func (gen *TagGenerator) TagLBSG(namespace string, ingressName string) map[strin
 
 func (gen *TagGenerator) TagInstanceSG(namespace string, ingressName string) map[string]string {
 	return gen.tagSGs(namespace, ingressName)
+}
+
+func (gen *TagGenerator) TagGlobalInstanceSG() map[string]string {
+	m := make(map[string]string)
+	for label, value := range gen.DefaultTags {
+		m[label] = value
+	}
+	// To avoid conflict with core k8s, we don't tag SGs with `kubernetes.io/cluster/clusterName` since
+	// core k8s currently used `kubernetes.io/cluster/clusterName` tag to identify tags for service with Type LoadBalancer.
+	// see https://github.com/kubernetes/kubernetes/blob/e056703ea7474990f5d7c58813082065543187eb/pkg/cloudprovider/providers/aws/aws.go#L3768
+	// A more sensible approach in the future should be change the out-of-tree cloud-provider-aws for more advanced SG discovery mechanism.
+	// we can do it when out-of-tree cloud-provider-aws is stable.
+	m[TagKeyClusterName] = gen.ClusterName
+
+	m[TagKeyGlobalInstanceSG] = "true"
+
+	return m
+
 }
 
 func (gen *TagGenerator) tagIngressResources(namespace string, ingressName string) map[string]string {
