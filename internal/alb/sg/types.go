@@ -13,6 +13,9 @@ type NameGenerator interface {
 
 	// NameLBSG generates name for managed securityGroup that will be attached to EC2 instances.
 	NameInstanceSG(namespace string, ingressName string) string
+
+	// NameGlobalInstanceSG generates name for managed global securityGroup that will be attached to EC2 instances.
+	NameGlobalInstanceSG() string
 }
 
 // TagGenerator provides tag generation functionality for sg package.
@@ -22,6 +25,9 @@ type TagGenerator interface {
 
 	// TagInstanceSG generates tags for managed securityGroup that will be attached to EC2 instances.
 	TagInstanceSG(namespace string, ingressName string) map[string]string
+
+	// TagGlobalInstanceSG generates tags for managed global securityGroup that will be attached to EC2 instances.
+	TagGlobalInstanceSG() map[string]string
 }
 
 // NameTagGenerator is combination of NameGenerator and TagGenerator

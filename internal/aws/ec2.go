@@ -6,13 +6,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"k8s.io/apimachinery/pkg/util/wait"
-
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/request"
-
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 const (
@@ -43,6 +41,9 @@ type EC2API interface {
 
 	// GetSecurityGroupsByName retrieves securityGroups by securityGroupName(SecurityGroup names within vpc are unique)
 	GetSecurityGroupsByName(context.Context, []string) ([]*ec2.SecurityGroup, error)
+
+	// GetSecurityGroupsByTags retrieves securityGroups by a list of tags.
+	GetSecurityGroupsByTags(map[string]string) ([]*ec2.SecurityGroup, error)
 
 	// DeleteSecurityGroupByID delete securityGroup by securityGroupID
 	DeleteSecurityGroupByID(context.Context, string) error
@@ -311,4 +312,31 @@ func (c *Cloud) GetVpcWithContext(ctx context.Context) (*ec2.Vpc, error) {
 	}
 
 	return o.Vpcs[0], nil
+}
+
+func (c *Cloud) GetSecurityGroupsByTags(tags map[string]string) ([]*ec2.SecurityGroup, error) {
+	filters := []*ec2.Filter{
+		{
+			Name:   aws.String("vpc-id"),
+			Values: []*string{aws.String(c.vpcID)},
+		},
+	}
+
+	for k, v := range tags {
+		filters = append(filters, &ec2.Filter{
+			Name:   aws.String(fmt.Sprintf("tag:%s", k)),
+			Values: []*string{aws.String(v)},
+		})
+	}
+
+	securityGroups, err := c.describeSecurityGroupsHelper(&ec2.DescribeSecurityGroupsInput{
+		Filters: filters,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(securityGroups) == 0 {
+		return nil, nil
+	}
+	return securityGroups, nil
 }

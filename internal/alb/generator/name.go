@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/alb/sg"
-
+	"github.com/google/uuid"
 	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/alb/lb"
+	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/alb/sg"
 	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/alb/tg"
 )
 
@@ -58,4 +58,8 @@ func (gen *NameGenerator) NameLBSG(namespace string, ingressName string) string 
 
 func (gen *NameGenerator) NameInstanceSG(namespace string, ingressName string) string {
 	return "instance-" + gen.NameLB(namespace, ingressName)
+}
+
+func (gen *NameGenerator) NameGlobalInstanceSG() string {
+	return fmt.Sprintf("instance-global-%s-%s", gen.ALBNamePrefix, uuid.New().String()[:8])
 }
