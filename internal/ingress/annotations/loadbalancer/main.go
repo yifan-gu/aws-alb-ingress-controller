@@ -22,9 +22,8 @@ import (
 	"net"
 	"strings"
 
-	"github.com/golang/glog"
-
 	"github.com/aws/aws-sdk-go/service/elbv2"
+	"github.com/golang/glog"
 	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/aws"
 	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/ingress/annotations/parser"
 	"github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/ingress/errors"
@@ -46,6 +45,7 @@ type Config struct {
 	SecurityGroups []string
 	Subnets        []string
 	Attributes     []*elbv2.LoadBalancerAttribute
+	NoHostRouting  bool
 }
 
 type loadBalancer struct {
@@ -107,6 +107,11 @@ func (lb loadBalancer) Parse(ing parser.AnnotationInterface) (interface{}, error
 		return nil, err
 	}
 
+	noHostRouting := true
+	if _, err := parser.GetStringAnnotation("no-host-routing", ing); err != nil {
+		noHostRouting = false
+	}
+
 	return &Config{
 		WebACLId:      webACLId,
 		Scheme:        scheme,
@@ -118,6 +123,7 @@ func (lb loadBalancer) Parse(ing parser.AnnotationInterface) (interface{}, error
 
 		Subnets:        subnets,
 		SecurityGroups: securityGroups,
+		NoHostRouting:  noHostRouting,
 	}, nil
 }
 
