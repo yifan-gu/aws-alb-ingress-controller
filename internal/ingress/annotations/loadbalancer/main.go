@@ -46,6 +46,7 @@ type Config struct {
 	Subnets          []string
 	Attributes       []*elbv2.LoadBalancerAttribute
 	GlobalInstanceLb bool
+	NoHostRouting    bool
 }
 
 type loadBalancer struct {
@@ -112,6 +113,11 @@ func (lb loadBalancer) Parse(ing parser.AnnotationInterface) (interface{}, error
 		globalInstanceLb = false
 	}
 
+	noHostRouting := true
+	if _, err := parser.GetStringAnnotation("no-host-routing", ing); err != nil {
+		noHostRouting = false
+	}
+
 	return &Config{
 		WebACLId:      webACLId,
 		Scheme:        scheme,
@@ -125,6 +131,7 @@ func (lb loadBalancer) Parse(ing parser.AnnotationInterface) (interface{}, error
 		SecurityGroups: securityGroups,
 
 		GlobalInstanceLb: globalInstanceLb,
+		NoHostRouting:    noHostRouting,
 	}, nil
 }
 
